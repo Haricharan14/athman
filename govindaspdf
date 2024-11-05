@@ -1,0 +1,127 @@
+import cv2
+import numpy as np
+from pdf2image import convert_from_path
+import easyocr
+
+# Initialize EasyOCR reader
+reader = easyocr.Reader(['en'])  # Add language support as needed, e.g., ['en', 'fr'] for English and French
+
+def preprocess_image_for_ocr(image):
+    """Enhance the image for OCR without losing color information."""
+    # Adjust brightness and contrast slightly to make text more prominent
+    adjusted = cv2.convertScaleAbs(image, alpha=1.2, beta=20)
+    return adjusted
+
+def deskew_image(image):
+    """Deskew the image to align text for OCR."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=10)
+    if lines is not None:
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+            angles.append(angle)
+        median_angle = np.median(angles)
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+        image = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return image
+
+def extract_text_from_page(image):
+    """Extract text from a page including mathematical text using EasyOCR."""
+    processed_image = preprocess_image_for_ocr(image)
+    deskewed_image = deskew_image(processed_image)
+    results = reader.readtext(deskewed_image, detail=0)
+    text = "\n".join(results)
+    return text
+
+def detect_and_extract_table_data(image):
+    """Detect and extract table data from an image."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+
+    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+    horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_horizontal)
+
+    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
+    vertical_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_vertical)
+
+    table_structure = cv2.add(horizontal_lines, vertical_lines)
+    contours, _ = cv2.findContours(table_structure, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    cell_data = []
+    cell_positions = []
+
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w < 20 or h < 20:
+            continue
+        cell_image = image[y:y+h, x:x+w]
+        cell_text = "\n".join(reader.readtext(cell_image, detail=0)).strip()
+        cell_data.append(cell_text)
+        cell_positions.append((x, y, w, h))
+
+    sorted_cells = sorted(zip(cell_data, cell_positions), key=lambda c: (c[1][1], c[1][0]))
+    return sorted_cells
+
+def build_text_table_from_cells(cells):
+    """Format extracted cells into a readable text-based table."""
+    rows = []
+    current_row = []
+    last_y = None
+
+    for cell_text, (x, y, w, h) in cells:
+        if last_y is None or abs(y - last_y) > 10:
+            if current_row:
+                rows.append(current_row)
+            current_row = []
+            last_y = y
+        current_row.append(cell_text)
+
+    if current_row:
+        rows.append(current_row)
+
+    if not rows:
+        return ""
+
+    table_text = ""
+    max_columns = max(len(row) for row in rows) if rows else 0
+    header = " | ".join(["Column " + str(i+1) for i in range(max_columns)])
+    separator = " | ".join(["---"] * max_columns)
+    table_text += f"{header}\n{separator}\n"
+    
+    for row in rows:
+        row_text = " | ".join(row + [""] * (max_columns - len(row)))
+        table_text += f"{row_text}\n"
+
+    return table_text
+
+def extract_text_and_tables_from_pdf(pdf_path):
+    images = convert_from_path(pdf_path)
+    all_content = ""
+
+    for i, image in enumerate(images):
+        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        all_content += f"\n\n--- Page {i + 1} ---\n"
+
+        # Extract and add general text
+        page_text = extract_text_from_page(image_cv)
+        all_content += page_text + "\n"
+
+        # Detect and add tables
+        cells = detect_and_extract_table_data(image_cv)
+        table_text = build_text_table_from_cells(cells)
+        if table_text:
+            all_content += "\nTable Detected:\n" + table_text
+
+    return all_content
+
+# Example usage
+pdf_path = 'Quiz 2 Aug 4 2024/IIT M DIPLOMA AN EXAM QDD3 4 Aug 2024.pdf'  # Replace with your PDF path
+extracted_content = extract_text_and_tables_from_pdf(pdf_path)
+
+# Print the extracted content
+print(extracted_content)
