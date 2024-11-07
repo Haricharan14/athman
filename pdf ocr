@@ -1,0 +1,105 @@
+#Hare Krishna
+!pip install pdf2image pdfplumber easyocr pillow
+!sudo apt-get install -y poppler-utils
+import easyocr
+import pdf2image
+import numpy as np
+import re
+from pathlib import Path
+
+# Initialize EasyOCR reader
+reader = easyocr.Reader(['en'])
+
+# Define the PDF path
+pdf_path = "/content/drive/MyDrive/Quiz 2 Aug 4 2024/IIT M DIPLOMA AN EXAM QDD2 4 Aug 2024.pdf"
+
+# Convert PDF to images (one image per page)
+pages = pdf2image.convert_from_path(pdf_path, dpi=300)
+
+# Function to clean up common OCR artifacts
+def clean_text(text):
+    # Replace common OCR mistakes with regex
+    text = re.sub(r'\b0\b', 'O', text)          # Standalone 0 to O
+    text = re.sub(r'\b1\b', 'I', text)          # Standalone 1 to I
+    text = re.sub(r'\s{2,}', ' ', text)         # Replace multiple spaces with single
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)  # Remove non-printable characters
+    return text
+
+# Function to dynamically group text by proximity and detect code blocks
+def group_text_by_proximity(bounds, line_spacing_threshold=20):
+    grouped_text = []
+    current_group = []
+    last_y = None
+    is_code_block = False
+
+    for bound in bounds:
+        _, text, _ = bound
+        text = clean_text(text)
+
+        # Skip empty lines
+        if not text.strip():
+            continue
+
+        # Get the y-coordinate of the top-left corner
+        y_coord = bound[0][0][1]
+
+        # Check if the line contains code indicators (e.g., indentation or syntax symbols)
+        if re.match(r'^\s*[\w]+\s*=\s*|def |class |import ', text):
+            is_code_block = True
+        elif re.match(r'^[\[\]{}()<>:,\'"\-\+/|=*]+$', text):
+            is_code_block = True
+
+        # New grouping condition
+        if last_y is not None and abs(y_coord - last_y) > line_spacing_threshold:
+            # Join collected lines as a paragraph or code block
+            if is_code_block:
+                grouped_text.append("\n".join(current_group))
+                is_code_block = False
+            else:
+                grouped_text.append(" ".join(current_group))
+
+            current_group = []
+
+        # Append text to the current group
+        current_group.append(text)
+        last_y = y_coord
+
+    # Append any remaining text
+    if current_group:
+        if is_code_block:
+            grouped_text.append("\n".join(current_group))
+        else:
+            grouped_text.append(" ".join(current_group))
+
+    return "\n\n".join(grouped_text)
+
+# Process each page image with OCR
+all_text = []
+for page_num, page_image in enumerate(pages):
+    print(f"Processing page {page_num + 1}...")
+
+    # Convert Pillow Image to numpy array
+    page_array = np.array(page_image)
+
+    # Perform OCR and get bounding boxes with detected text
+    bounds = reader.readtext(page_array, detail=1)
+
+    # Group text by proximity
+    page_text = group_text_by_proximity(bounds, line_spacing_threshold=25)  # Adjust threshold if needed
+    all_text.append(f"Page {page_num + 1}:\n{page_text}\n" + "="*50 + "\n")
+
+# Combine all pages into one document text
+document_text = "\n".join(all_text)
+
+# Output the extracted and formatted text (optional)
+print(document_text)
+
+# Get the file name without the path or extension
+file_name = Path(pdf_path).stem  # Extracts "Week 4" from "/content/Week 4.pdf"
+
+# Save the extracted text to a .txt file with the PDF's base name
+output_text_path = f"{file_name}.txt"
+with open(output_text_path, "w") as text_file:
+    text_file.write(document_text)
+
+print(f"Text extracted and saved as {output_text_path}")
